@@ -1,0 +1,145 @@
+# -----------------------------
+# TERSCII ENCODING
+# -----------------------------
+_CHAR_TO_TERSCII_CODE = {}
+
+# Mapping for the Basic Roman Block (00-88)
+terscii_roman_block_map = [
+    # Col 0    Col 1    Col 2    Col 3    Col 4    Col 5    Col 6    Col 7    Col 8
+    ["ES", "SP", "0", "9", "I", "R", "_", "i", "r"], # Row 0
+    ["EL", "-", "1", "A", "J", "S", "a", "j", "s"], # Row 1
+    ["ET", "'", "2", "B", "K", "T", "b", "k", "t"], # Row 2
+    ["LR", ",", "3", "C", "L", "U", "c", "l", "u"], # Row 3
+    ["OP", ";", "4", "D", "M", "V", "d", "m", "v"], # Row 4
+    ["RL", ":", "5", "E", "N", "W", "e", "n", "w"], # Row 5
+    ["SU", ".", "6", "F", "O", "X", "f", "o", "x"], # Row 6
+    ["HT", "!", "7", "G", "P", "Y", "g", "p", "y"], # Row 7
+    ["SD", "?", "8", "H", "Q", "Z", "h", "q", "z"], # Row 8
+]
+
+for row_idx, row_chars in enumerate(terscii_roman_block_map):
+    for col_idx, char_code_str in enumerate(row_chars):
+        terscii_code = f"{row_idx}{col_idx}"
+        # Explicitly map known characters, prioritizing printable characters
+        if char_code_str == "SP":
+            _CHAR_TO_TERSCII_CODE[" "] = terscii_code
+        elif len(char_code_str) == 1: # Single character (digit, letter, punctuation)
+            _CHAR_TO_TERSCII_CODE[char_code_str] = terscii_code
+        # Control codes like ES, EL, ET, LR, OP, RL, SU, HT, SD are not direct printable chars 
+        # that would appear in the 'word' for this context, so we don't map them here.
+
+# Mapping for the Extended Block (Block 01)
+terscii_extended_block_map = [
+    # Col 0 Col 1 Col 2 Col 3 Col 4 Col 5 Col 6 Col 7 Col 8
+    [None, '‘', None, None, None, None, None, None, None], # Row 0
+    [None, '*', None, None, None, None, None, None, None], # Row 1
+    [None, '’', None, None, None, None, None, None, None], # Row 2
+    [None, '/', None, None, None, None, None, None, None], # Row 3
+    [None, '|', None, None, None, None, None, None, None], # Row 4
+    [None, '\\', None, None, None, None, None, None, None], # Row 5
+    [None, '‹', None, None, None, None, None, None, None], # Row 6
+    [None, '◊', None, None, None, None, None, None, None], # Row 7
+    [None, '›', None, None, None, None, None, None, None], # Row 8
+]
+
+# Process Extended Block
+for row_idx, row_chars in enumerate(terscii_extended_block_map):
+    for col_idx, char_code_str in enumerate(row_chars):
+        if char_code_str is not None: # Only map if character is present
+            terscii_code = f"1{row_idx}{col_idx}" # Block 1 prefix, e.g., '101' for '‘'
+            _CHAR_TO_TERSCII_CODE[char_code_str] = terscii_code
+
+def word_to_terscii_string(word):
+    terscii_parts = []
+    for char in word:
+        terscii_code = _CHAR_TO_TERSCII_CODE.get(char)
+        if terscii_code is None:
+            terscii_parts.append("00") # Default to 'ES' (End of String) for unmapped characters
+        else:
+            terscii_parts.append(terscii_code)
+    return "".join(terscii_parts)
+
+def convert_hex_string_to_terscii_codes(hex_str):
+    terscii_hex_parts = []
+    for char in hex_str.upper(): # Ensure uppercase for hex digits A-F
+        terscii_code = _CHAR_TO_TERSCII_CODE.get(char)
+        if terscii_code is None:
+            # For characters not explicitly in the TerSCII tables (e.g. if pad chars were not '0')
+            # Fallback to '00' (ES) as a general default.
+            terscii_hex_parts.append("00")
+        else:
+            terscii_hex_parts.append(terscii_code)
+    return "".join(terscii_hex_parts)
+
+# -----------------------------
+# COLLISION RESOLUTION AND ORCHESTRATION
+# -----------------------------
+
+def process_words_with_collision_resolution(words):
+    global_seen_addresses = set()
+    jump_register = {}
+    final_output = []
+    MAX_COLLISION_ATTEMPTS = 64 # Cap similar to internal octal doubling
+
+    print("\n--- Processing Words ---\n")
+
+    for word in words:
+        print(f"Analyzing WORD: {word}")
+        word_registry = analyze(word)
+        terscii_representation = word_to_terscii_string(word)
+
+        # Store current word's results temporarily to allow for jump register updates
+        current_word_processed_entries = []
+
+        for hept, original_full_addr, radix_val, seq_counter in word_registry:
+            current_seq_counter = seq_counter
+            current_full_addr = original_full_addr
+            attempts = 0
+            collision_detected_for_this_entry = False
+
+            # Extract base parts to rebuild address
+            pad_radix_part = original_full_addr[2:23] # '0'*15 + radix_hex
+
+            while current_full_addr in global_seen_addresses and attempts < MAX_COLLISION_ATTEMPTS:
+                if not collision_detected_for_this_entry: # Mark first collision for this entry
+                    collision_detected_for_this_entry = True
+                    # Only add to jump register if it's the first time this original address causes a collision
+                    if original_full_addr not in jump_register:
+                        jump_register[original_full_addr] = None # Placeholder, will be updated with final unique address
+
+                current_seq_counter += 1
+                # The current_seq_counter (0-63) directly maps to a TerSCII index (0-80).
+                # We format this index as a 3-digit hex string for the address.
+                new_seq_hex = format(current_seq_counter, '03X')
+                current_full_addr = f"0x{pad_radix_part}{new_seq_hex}"
+                attempts += 1
+
+            if collision_detected_for_this_entry:
+                jump_register[original_full_addr] = current_full_addr
+
+            if current_full_addr in global_seen_addresses:
+                print(f"  WARNING: Collision for {word} at {current_full_addr} could not be resolved after {MAX_COLLISION_ATTEMPTS} attempts. Using potentially non-unique address: {current_full_addr}")
+
+            global_seen_addresses.add(current_full_addr)
+            current_word_processed_entries.append((word, hept, current_full_addr, terscii_representation))
+
+        final_output.extend(current_word_processed_entries)
+
+    # Sort the final output by hept_to_int value across all words
+    # Sorting key remains on the base hept value, not the appended terscii representation
+    final_output.sort(key=lambda x: hept_to_int(x[1]))
+
+    print("\n--- Final Registry Output ---\n")
+    for idx, (word, hept, full_addr, terscii_encoded_word) in enumerate(final_output):
+        last9 = full_addr[-9:]
+        terscii_encoded_last9_hex = convert_hex_string_to_terscii_codes(last9)
+        # The requested format: idx:HEPT_code<TERSCII_encoded_address_part>TERSCII_encoded_word
+        print(f"{idx}:{hept}<{terscii_encoded_last9_hex}>{terscii_encoded_word}")
+
+    # Removed printing of jump_register debugfs as requested.
+
+# -----------------------------
+# RUN IT WITH MULTIPLE WORDS
+# -----------------------------
+words_to_analyze = ["Hello, ", "World!"]
+process_words_with_collision_resolution(words_to_analyze)
